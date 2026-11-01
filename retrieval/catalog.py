@@ -16,8 +16,12 @@ from pathlib import Path
 
 
 def iter_jsonl(path: Path):
+    """Yield complete JSON lines. A last line without its newline is a write in
+    progress (the producer is appending right now): stop before it."""
     with open(path) as f:
         for line in f:
+            if not line.endswith("\n"):
+                break
             line = line.strip()
             if line:
                 yield json.loads(line)

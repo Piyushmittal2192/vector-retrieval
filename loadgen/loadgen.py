@@ -7,12 +7,24 @@ when the server slows down and hides the queueing it should be measuring
 ("coordinated omission"). Latency here is measured from the SCHEDULED send
 time, so time spent waiting for a free connection counts.
 
-Examples
-  # 60 s at 200 req/s, results in reports/steady-200
-  python -m loadgen.loadgen --target http://localhost:8080 --rate 200 --duration 60 --out reports/steady-200
+Modes
+  constant  open loop, one rate:            --rate 200 --duration 60
+  sweep     open loop, several rates:       --rates 50,100,200,400 --step-duration 30
+  closed    closed loop, N concurrent users, each waiting for its answer before
+            sending again:                  --concurrency 1,10,100 --step-duration 30
+            Useful for "what happens with 100 simultaneous users", and to check
+            Little's law (users = throughput x latency). It is NOT how to measure
+            an SLO: it slows down when the server does.
 
-  # capacity sweep
+Slow requests (Stage 6A): --slow-frac 0.05 makes 5% of requests slow, either
+  --slow-kind simulate   server sleeps --slow-ms inside the compute step (deterministic)
+  --slow-kind long       query padded to --slow-chars characters (real encoder cost)
+The summary then splits latency into fast and slow requests.
+
+Examples
+  python -m loadgen.loadgen --target http://localhost:8080 --rate 200 --duration 60 --out reports/steady-200
   python -m loadgen.loadgen --target http://retrieval.search --mode sweep --rates 50,100,200,400 --step-duration 30
+  python -m loadgen.loadgen --target http://localhost:8000 --mode closed --concurrency 1,10,100 --step-duration 20
 
 Outputs in --out: summary.json, timeline.csv (per second), sweep.csv (sweep
 mode), and one line appended to <out>/../runs.csv.
@@ -34,6 +46,8 @@ from pathlib import Path
 
 from loadgen.httpclient import HTTPError, HTTPPool
 from loadgen.stats import LAT, STATUS, VER, latency_block, summarize, timeline
+
+FILLER = "heavy duty contractor grade construction with extended warranty and accessories for demanding home improvement projects"
 
 
 def load_queries(path: str) -> list[dict]:
@@ -85,16 +99,26 @@ class Runner:
         a = self.args
         loop = asyncio.get_running_loop()
         category = q.get("category") if a.category_frac and self.rng.random() < a.category_frac else None
+        slow = bool(a.slow_frac) and self.rng.random() < a.slow_frac
+        low = bool(a.low_priority_frac) and self.rng.random() < a.low_priority_frac
         payload = {"query": q["query"], "k": a.k}
+        if slow and a.slow_kind == "simulate":
+            payload["simulate_compute_ms"] = a.slow_ms
+        elif slow:
+            text = q["query"]
+            while len(text) < a.slow_chars:
+                text += " " + FILLER
+            payload["query"] = text[: a.slow_chars]
         if category:
             payload["category"] = category
         body = json.dumps(payload).encode()
-        key = (q["qid"], a.k, category)
+        key = (q["qid"], a.k, category, slow, low)
         status, err, ver, pod, build, rhash = 0, None, "", "", "", 0
         t_send = loop.time()
         self.inflight += 1
         try:
-            status, headers, data = await asyncio.wait_for(self.pool.request("POST", "/search", body), a.timeout)
+            extra = {"X-Priority": "low"} if low else None
+            status, headers, data = await asyncio.wait_for(self.pool.request("POST", "/search", body, extra), a.timeout)
             ver, pod = headers.get("x-index-version", ""), headers.get("x-served-by", "")
             if status == 200:
                 doc = json.loads(data)
@@ -138,6 +162,19 @@ class Runner:
         if tasks:
             await asyncio.gather(*tasks)
 
+    async def closed_phase(self, users: int, duration: float, t0_run: float, start_offset: float) -> None:
+        """`users` concurrent clients, each sending its next request as soon as the last one returns."""
+        loop = asyncio.get_running_loop()
+        start, end = t0_run + start_offset, t0_run + start_offset + duration
+        if start > loop.time():
+            await asyncio.sleep(start - loop.time())
+
+        async def user() -> None:
+            while loop.time() < end:
+                await self.fire(t0_run, loop.time(), self.picker.pick())
+
+        await asyncio.gather(*(user() for _ in range(users)))
+
     async def reporter(self, t0_run: float) -> None:
         every = self.args.report_every
         seen = 0
@@ -171,6 +208,8 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 async def main_async(args) -> int:
+    if args.mode == "closed":  # every user needs its own connection
+        args.connections = max(args.connections, max(int(x) for x in args.concurrency.split(",")))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     runner = Runner(args)
@@ -184,6 +223,36 @@ async def main_async(args) -> int:
         await runner.phase(args.rate, args.duration, t0, 0.0)
         duration = args.duration
         recs = runner.recs
+    elif args.mode == "closed":
+        offset = 0.0
+        recs = []
+        for users in [int(x) for x in args.concurrency.split(",")]:
+            print(f"--- {users} concurrent users for {args.step_duration}s (first {args.warmup}s excluded) ---", flush=True)
+            before = len(runner.recs)
+            await runner.closed_phase(users, args.step_duration, t0, offset)
+            step = [r for r in runner.recs[before:] if r[0] >= offset + args.warmup]
+            measured = args.step_duration - args.warmup
+            s = summarize(step, measured, args.slo_p99_ms, args.slo_error_rate)
+            ok_lat = [r[LAT] for r in step if r[STATUS] == 200]
+            mean = sum(ok_lat) / len(ok_lat) if ok_lat else float("nan")
+            sweep_rows.append(
+                {
+                    "concurrency": users,
+                    "achieved_rps": s["achieved_rps"],
+                    "error_rate": s["error_rate"],
+                    "mean_ms": round(mean * 1000, 2),
+                    **{k: s["latency"][k] for k in ("p50_ms", "p95_ms", "p99_ms", "max_ms")},
+                    "littles_law_users": round((s["achieved_rps"] or 0) * mean, 2),
+                    "slo_pass": s["slo"]["pass"],
+                }
+            )
+            row = sweep_rows[-1]
+            print(f"    -> {row['achieved_rps']}/s mean {row['mean_ms']}ms p99 {row['p99_ms']}ms errors {row['error_rate']:.4f}; "
+                  f"throughput x mean latency = {row['littles_law_users']} (should be close to {users})", flush=True)
+            recs.extend(step)
+            offset = loop.time() - t0 + args.pause
+            await asyncio.sleep(args.pause)
+        duration = sum(args.step_duration - args.warmup for _ in sweep_rows)
     else:
         offset = 0.0
         recs = []
@@ -222,11 +291,14 @@ async def main_async(args) -> int:
             "client": {**runner.pool.stats, "max_schedule_lag_ms": round(runner.max_lag * 1000, 2), "client_overflow": runner.dropped_client},
         }
     )
-    if sweep_rows:
+    if sweep_rows and args.mode == "sweep":
         passing = [r["offered_rps"] for r in sweep_rows if r["slo_pass"]]
         summary["sweep"] = sweep_rows
         summary["capacity_rps_at_slo"] = max(passing) if passing else 0
         write_csv(out / "sweep.csv", sweep_rows)
+    elif sweep_rows:
+        summary["closed_loop"] = sweep_rows
+        write_csv(out / "closed.csv", sweep_rows)
     write_csv(out / "timeline.csv", timeline(runner.recs))
     with open(out / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
@@ -260,7 +332,13 @@ async def main_async(args) -> int:
     print(f"versions {summary['versions']}  mixed-version seconds {summary['mixed_version_seconds']}")
     print(f"pods     {summary['pod_count']} (max/min share {summary['pod_imbalance_max_over_min']})  consistency {summary['consistency']}")
     print(f"client   {summary['client']}")
-    if sweep_rows:
+    if "by_priority" in summary:
+        for cls, b in summary["by_priority"].items():
+            print(f"{cls:<8} sent {b['requests']}  error rate {b['error_rate']:.4f}  p99 {b['latency']['p99_ms']} ms")
+    if "latency_by_class" in summary:
+        for cls, block in summary["latency_by_class"].items():
+            print(f"{cls:<8} p50 {block['p50_ms']}  p99 {block['p99_ms']}  max {block['max_ms']} ms  ({block['count']} ok)")
+    if "capacity_rps_at_slo" in summary:
         print(f"capacity at SLO: {summary['capacity_rps_at_slo']} req/s")
     print(f"SLO (p99 <= {args.slo_p99_ms} ms, errors <= {args.slo_error_rate}): {'PASS' if summary['slo']['pass'] else 'FAIL'}")
     print(f"results in {out}")
@@ -273,11 +351,12 @@ def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", default=os.getenv("TARGET", "http://localhost:8080"))
     ap.add_argument("--queries", default="data/queries.jsonl")
-    ap.add_argument("--mode", choices=["constant", "sweep"], default="constant")
+    ap.add_argument("--mode", choices=["constant", "sweep", "closed"], default="constant")
     ap.add_argument("--rate", type=float, default=50.0)
     ap.add_argument("--duration", type=float, default=60.0)
     ap.add_argument("--rates", default="25,50,100,200,400")
     ap.add_argument("--step-duration", type=float, default=30.0)
+    ap.add_argument("--concurrency", default="1,10,100", help="closed mode: concurrent users per step")
     ap.add_argument("--warmup", type=float, default=5.0)
     ap.add_argument("--pause", type=float, default=3.0)
     ap.add_argument("--arrival", choices=["poisson", "uniform"], default="poisson")
@@ -288,6 +367,11 @@ def parse_args(argv=None):
     ap.add_argument("--zipf", type=float, default=1.0, help="query popularity skew; 0 = uniform")
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--category-frac", type=float, default=0.0, help="fraction of requests with a category filter")
+    ap.add_argument("--low-priority-frac", type=float, default=0.0, help="fraction of requests sent with X-Priority: low")
+    ap.add_argument("--slow-frac", type=float, default=0.0, help="fraction of requests made slow")
+    ap.add_argument("--slow-kind", choices=["simulate", "long"], default="simulate")
+    ap.add_argument("--slow-ms", type=float, default=200.0, help="simulate: extra server compute per slow request")
+    ap.add_argument("--slow-chars", type=int, default=480, help="long: slow query length in characters")
     ap.add_argument("--slo-p99-ms", type=float, default=100.0)
     ap.add_argument("--slo-error-rate", type=float, default=0.001)
     ap.add_argument("--wait-ready", type=float, default=60.0, help="seconds to wait for /ready first (0 = skip)")

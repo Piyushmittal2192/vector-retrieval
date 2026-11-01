@@ -14,6 +14,9 @@ Behaviour:
     the whole batch in its single executor thread.
   * Requests whose caller already gave up (deadline passed) are dropped
     before doing work for them.
+  * Priority-aware shedding: low-priority requests (for example a background
+    recommendation widget) are refused once the queue is `low_shed_at` full,
+    so the remaining room is kept for interactive search.
 """
 from __future__ import annotations
 
@@ -32,8 +35,16 @@ class Overloaded(Exception):
 
 
 class MicroBatcher:
-    def __init__(self, process: Callable[[list], list], max_batch: int = 32, max_wait_s: float = 0.002, max_queue: int = 256):
+    def __init__(
+        self,
+        process: Callable[[list], list],
+        max_batch: int = 32,
+        max_wait_s: float = 0.002,
+        max_queue: int = 256,
+        low_shed_at: float = 0.5,
+    ):
         self.process = process
+        self.low_limit = max(1, int(max_queue * low_shed_at))
         self.max_batch = max_batch
         self.max_wait_s = max_wait_s
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue)
@@ -50,7 +61,10 @@ class MicroBatcher:
     def depth(self) -> int:
         return self.queue.qsize()
 
-    async def submit(self, item: Any, timeout_s: float) -> Any:
+    async def submit(self, item: Any, timeout_s: float, low_priority: bool = False) -> Any:
+        if low_priority and self.queue.qsize() >= self.low_limit:
+            METRICS.shed.inc(reason="low_priority")
+            raise Overloaded()
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
         enqueued = loop.time()

@@ -124,6 +124,12 @@ class Metrics:
         self.batch_size = Histogram("retrieval_batch_size", "Requests per micro-batch.", [1, 2, 4, 8, 16, 32, 64, 128])
         self.queue_depth = Gauge("retrieval_queue_depth", "Requests waiting for the worker.")
         self.inflight = Gauge("retrieval_inflight_requests", "Search requests being handled.")
+        self.compute_busy = Gauge("retrieval_compute_busy", "Compute calls running in threads (threadpool/semaphore modes), including ones whose caller timed out.")
+        self.loop_lag = Histogram(
+            "retrieval_event_loop_lag_seconds",
+            "How late a 100 ms timer fires on the event loop; high values mean something is blocking the loop.",
+            [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5],
+        )
         self.shed = Counter("retrieval_shed_total", "Requests rejected or abandoned, by reason.")
         self.query_cache = Counter("retrieval_query_cache_total", "Query embedding cache lookups.")
         self.index_info = Gauge("retrieval_index_info", "Loaded index (value is always 1).")

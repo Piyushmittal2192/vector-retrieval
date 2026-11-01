@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Failure drills. Run them while a load test is running in another terminal.
 #   ops/chaos.sh crash [COLOR]           process exits with no drain (like an OOM kill or segfault)
+#   ops/chaos.sh crash-encoder           one encoder service pod exits with no drain (Stage 9A)
 #   ops/chaos.sh delete [COLOR]          graceful pod deletion (preStop drain runs)
 #   ops/chaos.sh drain-node [NODE]       planned maintenance: evicts pods, respects the PDB
 #   ops/chaos.sh uncordon [NODE]
@@ -23,6 +24,12 @@ case "$cmd" in
     pod=$(pick_pod "${1:-}"); [ -n "$pod" ] || die "no running pod"
     echo "$(date -Iseconds) crashing $pod (exit without drain)"
     k exec "$pod" -c retrieval -- python -c "import urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8000/admin/crash', data=b'', method='POST'), timeout=3)" || true
+    ;;
+  crash-encoder)
+    pod=$(k get pods -l app=encoder --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | shuf -n1)
+    [ -n "$pod" ] || die "no running encoder pod"
+    echo "$(date -Iseconds) crashing encoder $pod"
+    k exec "$pod" -c encoder -- python -c "import urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8001/admin/crash', data=b'', method='POST'), timeout=3)" || true
     ;;
   delete)
     pod=$(pick_pod "${1:-}"); [ -n "$pod" ] || die "no running pod"
@@ -76,6 +83,6 @@ PY
     echo "created artifacts/indexes/$dst; deploy it with: FORCE=1 ops/deploy.sh green $dst"
     ;;
   *)
-    sed -n '2,12p' "$0"
+    sed -n '2,13p' "$0"
     ;;
 esac

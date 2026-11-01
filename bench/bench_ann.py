@@ -94,6 +94,30 @@ def main() -> None:
     rows = []
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+
+    # Exact search baseline: "when is HNSW the wrong choice?" starts here.
+    # Brute force needs no build, no graph memory, has perfect recall, and
+    # with BLAS it is batch-friendly; HNSW only wins once N is large enough.
+    lat = []
+    for i in range(min(200, q.shape[0])):
+        t0 = time.perf_counter()
+        brute_force_topk(base, q[i : i + 1], 10)
+        lat.append(time.perf_counter() - t0)
+    lat.sort()
+    t0 = time.perf_counter()
+    for s in range(0, min(q.shape[0], 320), 32):
+        brute_force_topk(base, q[s : s + 32], 10)
+    exact_qps = min(q.shape[0], 320) / (time.perf_counter() - t0)
+    exact_row = {
+        "source": source, "n": base.shape[0], "M": "exact", "ef_construction": "", "ef": "",
+        "recall_at_10": 1.0,
+        "p50_us": round(lat[len(lat) // 2] * 1e6, 1), "p99_us": round(lat[int(len(lat) * 0.99) - 1] * 1e6, 1),
+        "qps_1thread_batch32": round(exact_qps, 1),
+        "build_s": 0.0, "index_mb": round(base.nbytes / 2**20, 1), "load_s": "", "rss_delta_mb": "",
+    }
+    rows.append(exact_row)
+    print(exact_row, flush=True)
+    print("(exact search uses numpy/BLAS threads; set OMP_NUM_THREADS=1 for a like-for-like single-thread comparison)")
     for M in [int(x) for x in args.M.split(",")]:
         for efc in [int(x) for x in args.efc.split(",")]:
             idx = hnswlib.Index(space="cosine", dim=base.shape[1])

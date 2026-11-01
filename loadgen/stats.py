@@ -58,6 +58,27 @@ def summarize(recs: list[tuple], duration: float, slo_p99_ms: float, slo_error_r
     shares = {p: round(c / len(ok), 4) for p, c in pods.most_common()} if ok else {}
     imbalance = (max(pods.values()) / min(pods.values())) if len(pods) > 1 else 1.0
 
+    slow_ok = [r for r in ok if r[KEY] is not None and len(r[KEY]) > 3 and r[KEY][3]]
+    extra = {}
+    if slow_ok:
+        fast_ok = [r for r in ok if not (r[KEY] is not None and len(r[KEY]) > 3 and r[KEY][3])]
+        extra["latency_by_class"] = {
+            "fast": {**latency_block([r[LAT] for r in fast_ok]), "count": len(fast_ok)},
+            "slow": {**latency_block([r[LAT] for r in slow_ok]), "count": len(slow_ok)},
+        }
+
+    keyed = [r for r in recs if r[KEY] is not None and len(r[KEY]) > 4]
+    if any(r[KEY][4] for r in keyed):
+        extra["by_priority"] = {}
+        for name, flag in (("normal", False), ("low", True)):
+            group = [r for r in keyed if bool(r[KEY][4]) == flag]
+            good = [r for r in group if r[STATUS] == 200]
+            extra["by_priority"][name] = {
+                "requests": len(group),
+                "error_rate": round((len(group) - len(good)) / len(group), 6) if group else 0.0,
+                "latency": latency_block([r[LAT] for r in good]),
+            }
+
     verdict = bool(ok) and lat["p99_ms"] is not None and lat["p99_ms"] <= slo_p99_ms and error_rate <= slo_error_rate
     return {
         "requests": total,
@@ -76,6 +97,7 @@ def summarize(recs: list[tuple], duration: float, slo_p99_ms: float, slo_error_r
         "pod_imbalance_max_over_min": round(imbalance, 3),
         "consistency": {"query_versions_seen_on_multiple_pods": len(multi_pod), "inconsistent": len(inconsistent)},
         "slo": {"p99_ms": slo_p99_ms, "error_rate": slo_error_rate, "pass": verdict},
+        **extra,
     }
 
 

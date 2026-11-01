@@ -1,0 +1,103 @@
+# Separate embedding service (Stage 9A). Same image, different entrypoint.
+# Retrieval pods reach it at http://encoder.search.svc.cluster.local when
+# deployed with ENCODER=remote. Rendered by ops/deploy_encoder.sh.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: encoder
+  namespace: search
+  labels: {app: encoder}
+spec:
+  replicas: ${REPLICAS}
+  minReadySeconds: 5
+  selector:
+    matchLabels: {app: encoder}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  template:
+    metadata:
+      labels: {app: encoder}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8001"
+    spec:
+      terminationGracePeriodSeconds: 45
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app: encoder}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: encoder
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["uvicorn", "retrieval.encoder_server:app", "--host", "0.0.0.0", "--port", "8001",
+                    "--no-access-log", "--timeout-graceful-shutdown", "15"]
+          ports: [{name: http, containerPort: 8001}]
+          env:
+            - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+            - {name: ENCODER_BACKEND, value: "${ENCODER_BACKEND}"}
+            - {name: DEVICE, value: "${DEVICE}"}
+            - {name: TORCH_THREADS, value: "${TORCH_THREADS}"}
+            - {name: OMP_NUM_THREADS, value: "${TORCH_THREADS}"}
+            - {name: MAX_BATCH, value: "${MAX_BATCH}"}
+            - {name: MAX_WAIT_MS, value: "${MAX_WAIT_MS}"}
+            - {name: MAX_QUEUE, value: "${MAX_QUEUE}"}
+            - {name: REQUEST_TIMEOUT_MS, value: "${REQUEST_TIMEOUT_MS}"}
+            - {name: HF_HOME, value: /tmp/hf}
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["python", "-m", "retrieval.drain", "--port", "8001", "--wait", "10"]
+          resources:
+            requests: {cpu: "${CPU_REQUEST}", memory: "${MEMORY}"}
+            limits: {cpu: "${CPU_LIMIT}", memory: "${MEMORY}"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 1Gi}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: encoder
+  namespace: search
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app: encoder}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: encoder
+  namespace: search
+spec:
+  selector: {app: encoder}
+  ports: [{name: http, port: 80, targetPort: http}]

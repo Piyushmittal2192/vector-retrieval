@@ -25,7 +25,7 @@ def test_endpoints(make_server):
         status, headers, body = call(srv.url, "POST", "/search", {"query": "cordless drill 20v", "k": 5})
         doc = json.loads(body)
         assert status == 200 and len(doc["results"]) == 5
-        assert headers["x-index-version"] == "v1" and headers["x-served-by"] == "test-pod"
+        assert headers["x-index-version"] == "v1" and headers["x-served-by"].startswith("test-pod/")
         assert call(srv.url, "POST", "/search", {"query": "", "k": 5})[0] == 422
         assert call(srv.url, "POST", "/search", {"query": "x", "k": 1000})[0] == 422
         metrics = call(srv.url, "GET", "/metrics")[2].decode()

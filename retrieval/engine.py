@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -23,7 +24,7 @@ import numpy as np
 from retrieval import artifacts
 from retrieval.ann import AnnIndex
 from retrieval.config import Settings
-from retrieval.encoders import Encoder, fingerprint_cosines, load_encoder
+from retrieval.encoders import Encoder, LockedEncoder, fingerprint_cosines, load_encoder
 from retrieval.metrics import METRICS
 
 log = logging.getLogger("retrieval.engine")
@@ -38,6 +39,7 @@ class SearchItem:
     query: str
     k: int = 10
     category: str | None = None
+    simulate_ms: float = 0.0  # lab only: extra compute time, to create slow requests on demand
 
 
 class SearchEngine:
@@ -52,6 +54,7 @@ class SearchEngine:
         self.real_count = 0
         self.timings: dict[str, float] = {}
         self._cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._cache_lock = threading.Lock()
 
     # ------------------------------------------------------------ loading
 
@@ -74,7 +77,10 @@ class SearchEngine:
 
         m_enc = self.manifest["encoder"]
         if self.encoder is None:
-            self.encoder = load_encoder(s.encoder_backend, s.model_path, s.model_name, s.torch_threads)
+            self.encoder = load_encoder(s.encoder_backend, s.model_path, s.model_name, s.torch_threads, s.encoder_url, s.device)
+            # In the concurrent execution modes several threads share one model.
+            if s.exec_mode != "batcher" and s.encoder_lock and s.encoder_backend == "st":
+                self.encoder = LockedEncoder(self.encoder)
         t = self._stage("encoder", t)
         if self.encoder.name != m_enc["name"]:
             raise CompatibilityError(f"encoder {self.encoder.name!r} != index encoder {m_enc['name']!r}")
@@ -130,26 +136,29 @@ class SearchEngine:
             return self.encoder.encode(texts)
         out = np.empty((len(texts), self.encoder.dim), dtype=np.float32)
         missing = []
-        for i, t in enumerate(texts):
-            v = self._cache.get(t)
-            if v is None:
-                missing.append(i)
-            else:
-                self._cache.move_to_end(t)
-                out[i] = v
+        with self._cache_lock:
+            for i, t in enumerate(texts):
+                v = self._cache.get(t)
+                if v is None:
+                    missing.append(i)
+                else:
+                    self._cache.move_to_end(t)
+                    out[i] = v
         METRICS.query_cache.inc(len(texts) - len(missing), result="hit")
         METRICS.query_cache.inc(len(missing), result="miss")
         if missing:
-            vecs = self.encoder.encode([texts[i] for i in missing])
-            for i, v in zip(missing, vecs):
-                out[i] = v
-                self._cache[texts[i]] = v
-            while len(self._cache) > size:
-                self._cache.popitem(last=False)
+            vecs = self.encoder.encode([texts[i] for i in missing])  # outside the lock: the slow part
+            with self._cache_lock:
+                for i, v in zip(missing, vecs):
+                    out[i] = v
+                    self._cache[texts[i]] = v
+                while len(self._cache) > size:
+                    self._cache.popitem(last=False)
         return out
 
     def process_batch(self, items: list[SearchItem]) -> list[dict]:
-        """Encode + search a batch. Runs in the single worker thread."""
+        """Encode + search a batch. Runs in a worker thread, never on the event loop
+        (except in the deliberately bad EXEC_MODE=inline)."""
         unique: dict[str, int] = {}
         for it in items:
             unique.setdefault(it.query, len(unique))
@@ -162,6 +171,11 @@ class SearchEngine:
         k_max = max(it.k * (overfetch if it.category else 1) for it in items)
         labels, dists = self.ann.query(vecs, k_max)
         t2 = time.perf_counter()
+        slow = max((it.simulate_ms for it in items), default=0.0)
+        if slow > 0:
+            # A batch finishes when its slowest member does: everyone batched with
+            # a slow request waits for it (head-of-line blocking).
+            time.sleep(slow / 1000.0)
         METRICS.encode_seconds.observe(t1 - t0)
         METRICS.ann_seconds.observe(t2 - t1)
         METRICS.batch_size.observe(len(items))

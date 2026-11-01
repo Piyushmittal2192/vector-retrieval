@@ -1,11 +1,14 @@
 """hnswlib build and query helpers.
 
-Thread-safety contract used by the server: knn_query may run concurrently,
-but set_ef may not. The server funnels every query through ONE worker thread
-(see batcher.py), so changing ef per batch is safe there and nowhere else.
+Thread-safety: hnswlib's knn_query may run from several threads at once
+(it releases the GIL while searching), but ef is one shared setting on the
+index. When a request needs k > ef, ef is raised under a lock and never
+lowered again: concurrent searches may then run with a larger ef (slower,
+never less accurate). Restarting the pod resets it.
 """
 from __future__ import annotations
 
+import threading
 import time
 
 import hnswlib
@@ -55,16 +58,18 @@ class AnnIndex:
         self.dim = dim
         self.default_ef = default_ef
         self._ef = default_ef
+        self._ef_lock = threading.Lock()
         self.index.set_ef(default_ef)
         self.index.set_num_threads(1)
 
     def query(self, vectors: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-        """Batch query. Call from a single thread (it may change ef)."""
+        """Batch query; safe to call from several threads."""
         k = max(1, min(k, self.count))
-        ef = max(self.default_ef, k)
-        if ef != self._ef:
-            self.index.set_ef(ef)
-            self._ef = ef
+        if k > self._ef:  # hnswlib needs ef >= k
+            with self._ef_lock:
+                if k > self._ef:
+                    self.index.set_ef(k)
+                    self._ef = k
         return self.index.knn_query(vectors, k=k, num_threads=1)
 
 

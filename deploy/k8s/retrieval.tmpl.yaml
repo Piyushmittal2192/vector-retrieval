@@ -62,6 +62,9 @@ spec:
             - {name: INDEX_DIR, value: "/index/${INDEX_VERSION}"}
             - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
             - {name: ENCODER_BACKEND, value: "${ENCODER_BACKEND}"}
+            - {name: ENCODER_URL, value: "${ENCODER_URL}"}
+            - {name: EXEC_MODE, value: "${EXEC_MODE}"}
+            - {name: COMPUTE_SLOTS, value: "${COMPUTE_SLOTS}"}
             - {name: TORCH_THREADS, value: "${TORCH_THREADS}"}
             - {name: OMP_NUM_THREADS, value: "${TORCH_THREADS}"}
             - {name: MAX_BATCH, value: "${MAX_BATCH}"}

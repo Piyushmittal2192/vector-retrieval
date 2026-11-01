@@ -4,6 +4,10 @@
 ARG PYTHON_IMAGE=python:3.12-slim
 
 FROM ${PYTHON_IMAGE} AS build
+# CPU wheels by default. For a GPU encoder image pass the CUDA wheel index that
+# matches your node's driver (see pytorch.org), e.g.
+#   docker build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cuXXX ...
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential \
  && rm -rf /var/lib/apt/lists/*
@@ -18,11 +22,11 @@ COPY requirements/ /tmp/req/
 RUN pip install --upgrade pip \
  && if [ -f /tmp/req/serve.lock ]; then \
       echo "installing from serve.lock" \
-      && pip install --extra-index-url https://download.pytorch.org/whl/cpu -r /tmp/req/serve.lock; \
+      && pip install --extra-index-url "$TORCH_INDEX_URL" -r /tmp/req/serve.lock; \
     else \
       echo "no serve.lock yet: resolving ranges (run 'make lock' afterwards)" \
-      && pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.3" \
-      && pip install --extra-index-url https://download.pytorch.org/whl/cpu -r /tmp/req/serve.in; \
+      && pip install --index-url "$TORCH_INDEX_URL" "torch>=2.3" \
+      && pip install --extra-index-url "$TORCH_INDEX_URL" -r /tmp/req/serve.in; \
     fi \
  && pip freeze > /opt/venv/requirements.freeze
 
