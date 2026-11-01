@@ -1,0 +1,13 @@
+# The user-facing Service. Promotion = changing spec.selector.color
+# (ops/promote.sh). Rollback = changing it back. Both colors stay running
+# until you retire the old one, so either switch is instant.
+apiVersion: v1
+kind: Service
+metadata:
+  name: retrieval
+  namespace: search
+spec:
+  type: NodePort
+  selector: {app: retrieval, color: blue}
+  ports:
+    - {name: http, port: 80, targetPort: http, nodePort: 30080}

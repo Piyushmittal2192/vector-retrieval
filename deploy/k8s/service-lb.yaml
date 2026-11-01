@@ -1,0 +1,12 @@
+# GKE variant of service.yaml: a cloud L4 load balancer instead of a NodePort.
+# Same selector, so ops/promote.sh works unchanged.
+apiVersion: v1
+kind: Service
+metadata:
+  name: retrieval
+  namespace: search
+spec:
+  type: LoadBalancer
+  selector: {app: retrieval, color: blue}
+  ports:
+    - {name: http, port: 80, targetPort: http}

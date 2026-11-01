@@ -1,0 +1,10 @@
+# Serving dependencies, as compatible ranges. `make lock` freezes the exact
+# versions resolved inside the image into requirements/serve.lock, and later
+# image builds install from the lock. torch is installed separately from the
+# CPU-only wheel index (no CUDA libraries: about 5x smaller image).
+starlette>=0.40,<2
+uvicorn[standard]>=0.30,<1
+pydantic>=2.6,<3
+numpy>=1.26,<3
+hnswlib>=0.8.0,<0.9
+sentence-transformers>=3.0,<6

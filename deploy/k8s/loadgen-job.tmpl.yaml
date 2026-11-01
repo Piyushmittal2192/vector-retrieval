@@ -1,0 +1,37 @@
+# In-cluster load generator. Runs on the control-plane node so the workers
+# only carry retrieval pods. Writes results to ./reports on your machine.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}
+  namespace: search
+  labels: {app: loadgen}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels: {app: loadgen}
+    spec:
+      restartPolicy: Never
+      nodeSelector: {node-role.kubernetes.io/control-plane: ""}
+      tolerations:
+        - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+      securityContext: {runAsUser: ${HOST_UID}, runAsGroup: ${HOST_GID}}
+      containers:
+        - name: loadgen
+          image: ${LOADGEN_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "${MODULE}"]
+          args: ${ARGS}
+          resources:
+            requests: {cpu: "1", memory: 256Mi}
+            limits: {cpu: "${LOADGEN_CPU}", memory: 2Gi}
+          volumeMounts:
+            - {name: artifacts, mountPath: /artifacts, readOnly: true}
+            - {name: reports, mountPath: /reports}
+      volumes:
+        - name: artifacts
+          hostPath: {path: /artifacts, type: Directory}
+        - name: reports
+          hostPath: {path: /reports, type: Directory}

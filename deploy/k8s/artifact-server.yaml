@@ -1,0 +1,43 @@
+# Stand-in for an object store (GCS/S3): read-only HTTP over ./artifacts.
+# Index versions are fetched from here by each retrieval pod's init container.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: artifact-server
+  namespace: search
+  labels: {app: artifact-server}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: artifact-server}
+  template:
+    metadata:
+      labels: {app: artifact-server}
+    spec:
+      nodeSelector: {node-role.kubernetes.io/control-plane: ""}
+      tolerations:
+        - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+      containers:
+        - name: nginx
+          image: nginx:stable-alpine
+          ports: [{containerPort: 80}]
+          readinessProbe:
+            tcpSocket: {port: 80}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          volumeMounts:
+            - {name: artifacts, mountPath: /usr/share/nginx/html, readOnly: true}
+      volumes:
+        - name: artifacts
+          hostPath: {path: /artifacts, type: Directory}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: artifact-server
+  namespace: search
+spec:
+  selector: {app: artifact-server}
+  ports: [{port: 80, targetPort: 80}]

@@ -1,0 +1,4 @@
+# Laptop venv: everything the image has, plus test and plotting tools.
+-r serve.in
+pytest>=8
+matplotlib>=3.8

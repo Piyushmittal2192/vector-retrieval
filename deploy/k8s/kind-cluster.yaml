@@ -1,0 +1,31 @@
+# 1 control plane (runs the artifact server, Prometheus and load generator)
+# + 2 workers (run only the retrieval pods, so node drills hit only them).
+# ${LAB_ROOT} is filled in by ops/kind_up.sh with the absolute repo path.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: retrieval-lab
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080   # NodePort of Service "retrieval" -> http://localhost:8080
+        hostPort: 8080
+        protocol: TCP
+      - containerPort: 30090   # Prometheus UI -> http://localhost:9090
+        hostPort: 9090
+        protocol: TCP
+    extraMounts:
+      - hostPath: ${LAB_ROOT}/artifacts
+        containerPath: /artifacts
+        readOnly: true
+      - hostPath: ${LAB_ROOT}/reports
+        containerPath: /reports
+  - role: worker
+    extraMounts:
+      - hostPath: ${LAB_ROOT}/artifacts
+        containerPath: /artifacts
+        readOnly: true
+  - role: worker
+    extraMounts:
+      - hostPath: ${LAB_ROOT}/artifacts
+        containerPath: /artifacts
+        readOnly: true
